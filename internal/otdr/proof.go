@@ -37,22 +37,61 @@ func NewProofSet() *ProofSet {
 	return &ProofSet{proofs: make(map[Direction]Proof)}
 }
 
-func (s *ProofSet) Add(proof Proof) (ProofResult, error) {
+func validateProof(proof Proof) error {
 	if proof.Direction != DirectionEastToWest && proof.Direction != DirectionWestToEast {
-		return ProofResult{}, fmt.Errorf("unsupported proof direction %q", proof.Direction)
+		return fmt.Errorf("unsupported proof direction %q", proof.Direction)
 	}
+	return nil
+}
+
+// Preview returns the result the set would have if proof were committed,
+// without storing it. Callers must only Commit once the surrounding
+// transaction (route restore, span transition) has succeeded.
+func (s *ProofSet) Preview(proof Proof) (ProofResult, error) {
+	if err := validateProof(proof); err != nil {
+		return ProofResult{}, err
+	}
+	s.mu.RLock()
+	defer s.mu.RUnlock()
+	return s.resultWith(proof), nil
+}
+
+// Commit stores a proof that was already accepted via Preview and returns the
+// resulting set state.
+func (s *ProofSet) Commit(proof Proof) ProofResult {
 	s.mu.Lock()
+	defer s.mu.Unlock()
 	s.proofs[proof.Direction] = proof
-	s.mu.Unlock()
-	return s.Result(), nil
+	return resultOf(s.proofs)
+}
+
+// Reset discards every stored proof so a rejected splice can start a fresh
+// proving round.
+func (s *ProofSet) Reset() {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	s.proofs = make(map[Direction]Proof)
+}
+
+func (s *ProofSet) resultWith(overlay Proof) ProofResult {
+	merged := make(map[Direction]Proof, len(s.proofs)+1)
+	for direction, proof := range s.proofs {
+		merged[direction] = proof
+	}
+	merged[overlay.Direction] = overlay
+	return resultOf(merged)
 }
 
 func (s *ProofSet) Result() ProofResult {
 	s.mu.RLock()
 	defer s.mu.RUnlock()
+	return resultOf(s.proofs)
+}
+
+func resultOf(proofs map[Direction]Proof) ProofResult {
 	result := ProofResult{Passed: true}
 	for _, direction := range []Direction{DirectionEastToWest, DirectionWestToEast} {
-		proof, exists := s.proofs[direction]
+		proof, exists := proofs[direction]
 		if !exists {
 			result.Passed = false
 			continue
