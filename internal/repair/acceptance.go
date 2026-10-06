@@ -52,26 +52,34 @@ func (s *AcceptanceService) Register(spanID string, target *span.Span, route *ro
 func (s *AcceptanceService) AddProof(ctx context.Context, acceptanceID, spanID string, proof otdr.Proof) (Acceptance, error) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
-	set := s.proofSets[acceptanceID]
-	if set == nil {
-		set = otdr.NewProofSet()
-		s.proofSets[acceptanceID] = set
-	}
-	result, err := set.Add(proof)
-	if err != nil {
-		return Acceptance{}, err
-	}
 	target := s.spans[spanID]
 	path := s.routes[spanID]
 	if target == nil || path == nil {
 		return Acceptance{}, fmt.Errorf("acceptance span %s is not registered", spanID)
 	}
+	set := s.proofSets[acceptanceID]
+	if set == nil {
+		set = otdr.NewProofSet()
+		s.proofSets[acceptanceID] = set
+	}
+	// The proof joins the set only after every check and side effect below
+	// succeeds, so a failed submission never leaves a half-written proof behind.
+	result, err := set.Preview(proof)
+	if err != nil {
+		return Acceptance{}, err
+	}
 	acceptance := Acceptance{ID: acceptanceID, SpanID: spanID, Proofs: result, State: target.Snapshot().State, UpdatedAt: s.now().UTC()}
 	if !result.Complete {
+		if _, err := set.Add(proof); err != nil {
+			return Acceptance{}, err
+		}
 		s.acceptances[acceptanceID] = acceptance
 		return acceptance, nil
 	}
 	if !result.Passed {
+		if _, err := set.Add(proof); err != nil {
+			return Acceptance{}, err
+		}
 		if target.Snapshot().State == span.StateProving {
 			_, _ = target.RejectProof(s.now())
 		}
@@ -86,6 +94,9 @@ func (s *AcceptanceService) AddProof(ctx context.Context, acceptanceID, spanID s
 		return Acceptance{}, err
 	}
 	if _, err := target.Recover(s.now()); err != nil {
+		return Acceptance{}, err
+	}
+	if _, err := set.Add(proof); err != nil {
 		return Acceptance{}, err
 	}
 	acceptance.State = target.Snapshot().State

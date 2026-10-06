@@ -42,17 +42,38 @@ func (s *ProofSet) Add(proof Proof) (ProofResult, error) {
 		return ProofResult{}, fmt.Errorf("unsupported proof direction %q", proof.Direction)
 	}
 	s.mu.Lock()
+	defer s.mu.Unlock()
 	s.proofs[proof.Direction] = proof
-	s.mu.Unlock()
-	return s.Result(), nil
+	return resultOf(s.proofs), nil
+}
+
+// Preview validates proof and reports the result Add would produce without
+// recording it, so callers can finish checks and side effects before the
+// proof joins the set.
+func (s *ProofSet) Preview(proof Proof) (ProofResult, error) {
+	if proof.Direction != DirectionEastToWest && proof.Direction != DirectionWestToEast {
+		return ProofResult{}, fmt.Errorf("unsupported proof direction %q", proof.Direction)
+	}
+	s.mu.RLock()
+	defer s.mu.RUnlock()
+	merged := make(map[Direction]Proof, len(s.proofs)+1)
+	for direction, existing := range s.proofs {
+		merged[direction] = existing
+	}
+	merged[proof.Direction] = proof
+	return resultOf(merged), nil
 }
 
 func (s *ProofSet) Result() ProofResult {
 	s.mu.RLock()
 	defer s.mu.RUnlock()
+	return resultOf(s.proofs)
+}
+
+func resultOf(proofs map[Direction]Proof) ProofResult {
 	result := ProofResult{Passed: true}
 	for _, direction := range []Direction{DirectionEastToWest, DirectionWestToEast} {
-		proof, exists := s.proofs[direction]
+		proof, exists := proofs[direction]
 		if !exists {
 			result.Passed = false
 			continue
